@@ -1,0 +1,1021 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>2v2 Shuffle — Offline</title>
+
+<!-- PWA / "Add to Home Screen" support -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0e1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="2v2 Shuffle">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+  :root {
+    --bg: #0e1117;
+    --card: #1a1f2b;
+    --card-border: #2a3040;
+    --text: #ffffff;
+    --muted: #9aa4b2;
+    --accent: #4f8cff;
+    --accent2: #22c55e;
+    --warn: #f1c40f;
+    --danger: #e74c3c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    padding: 16px;
+    line-height: 1.4;
+  }
+  #app { max-width: 760px; margin: 0 auto; }
+  h1, h2, h3 { margin: 0.4em 0 0.3em; }
+  h1 { font-size: 1.5em; }
+  h2 { font-size: 1.2em; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 100px; }
+  label { display: block; font-size: 0.85em; color: var(--muted); margin-bottom: 4px; }
+  input, select, button {
+    font-size: 1em;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--card-border);
+    background: #11151d;
+    color: var(--text);
+    width: 100%;
+  }
+  input:focus, select:focus { outline: 1px solid var(--accent); }
+  button {
+    background: var(--accent);
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    margin-top: 6px;
+  }
+  button:hover { filter: brightness(1.1); }
+  button.secondary { background: #2a3040; }
+  button.danger { background: var(--danger); }
+  button.success { background: var(--accent2); }
+  .small-btn { width: auto; padding: 6px 10px; font-size: 0.85em; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--card-border); font-size: 0.92em; }
+  th { color: var(--muted); font-weight: 600; }
+  .muted { color: var(--muted); font-size: 0.88em; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.78em; margin-left: 6px; }
+  .badge-warn { background: rgba(241,196,15,0.15); color: var(--warn); }
+  .badge-danger { background: rgba(231,76,60,0.15); color: var(--danger); }
+  .badge-ok { background: rgba(34,197,94,0.15); color: var(--accent2); }
+  .match-card { background: #11151d; border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+  .cols3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  @media (max-width: 560px) { .cols3 { grid-template-columns: 1fr; } }
+  .divider { border-top: 1px solid var(--card-border); margin: 14px 0; }
+  a.download-link { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .banner-warn { background: rgba(241,196,15,0.12); border: 1px solid var(--warn); color: var(--warn); padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; }
+  .banner-ok { background: rgba(34,197,94,0.12); border: 1px solid var(--accent2); color: var(--accent2); padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* =========================================================================
+   CORE SCHEDULING / SCORING LOGIC
+   (identical algorithms to the online app's Python backend — tested for
+   parity: same fairness ordering, same team-split scoring, same cycle math,
+   same streak rules. Runs entirely client-side, no network calls anywhere.)
+   ========================================================================= */
+
+function gcd(a, b) { a = Math.abs(a); b = Math.abs(b); while (b) { [a, b] = [b, a % b]; } return a; }
+
+function combinations(arr, k) {
+  const results = [];
+  const n = arr.length;
+  function helper(start, combo) {
+    if (combo.length === k) { results.push(combo.slice()); return; }
+    for (let i = start; i < n; i++) {
+      combo.push(arr[i]);
+      helper(i + 1, combo);
+      combo.pop();
+    }
+  }
+  helper(0, []);
+  return results;
+}
+
+function computeRoundPoints(gameType, scoreA, scoreB) {
+  if (gameType === 'babyfoot') {
+    if (scoreA === 10) return scoreB >= 6 ? [2, 1] : [3, 0];
+    return scoreA >= 6 ? [1, 2] : [0, 3];
+  }
+  if (scoreA > scoreB) return [1, 0];
+  if (scoreB > scoreA) return [0, 1];
+  return [0, 0];
+}
+
+function recomputePlayerStats(players, completedRounds, gameType) {
+  for (const name in players) {
+    players[name].played = 0;
+    players[name].tourney_pts = 0;
+    players[name].diff = 0;
+    players[name].points_won = 0;
+  }
+  for (const rd of completedRounds) {
+    for (const [teamA, teamB, scoreA, scoreB] of rd.results) {
+      const [ptsA, ptsB] = computeRoundPoints(gameType, scoreA, scoreB);
+      for (const p of teamA) {
+        if (players[p]) {
+          players[p].played += 1;
+          players[p].points_won += scoreA;
+          players[p].diff += (scoreA - scoreB);
+          players[p].tourney_pts += ptsA;
+        }
+      }
+      for (const p of teamB) {
+        if (players[p]) {
+          players[p].played += 1;
+          players[p].points_won += scoreB;
+          players[p].diff += (scoreB - scoreA);
+          players[p].tourney_pts += ptsB;
+        }
+      }
+    }
+  }
+}
+
+function calculateCycleInfo(playersDict, numCourts, teamSize) {
+  teamSize = teamSize || 2;
+  const activePool = Object.values(playersDict).filter(s => !s.retired).map(s => s.played);
+  if (activePool.length === 0) return [0, 0, 0];
+  const N = activePool.length;
+  const slotSize = teamSize * 2;
+  const matchesPerRound = slotSize > 0 ? Math.min(numCourts, Math.floor(N / slotSize)) : 0;
+  const P = matchesPerRound * slotSize;
+  if (P === 0) return [0, 0, 0];
+  const Mmax = Math.max(...activePool), Mmin = Math.min(...activePool);
+  const lcmV = (P * N) / gcd(P, N);
+  const cRounds = Math.floor(lcmV / P);
+  const cMatches = cRounds * matchesPerRound;
+  if (Mmax === Mmin) return [0, cRounds, cMatches];
+  if (N === P) return [-1, cRounds, cMatches];
+  const S0 = activePool.reduce((acc, m) => acc + (Mmax - m), 0);
+  for (let k = 0; k < 5000; k++) {
+    const S = S0 + k * N;
+    if (S % P === 0) {
+      const R = S / P;
+      const T = Mmax + k;
+      if (R >= (T - Mmin)) return [R, cRounds, cMatches];
+    }
+  }
+  return [-2, cRounds, cMatches];
+}
+
+function computeStreaks(players, completedRounds) {
+  const streaks = {};
+  for (const name in players) streaks[name] = 0;
+  for (const rd of completedRounds) {
+    const roundResult = {};
+    for (const [teamA, teamB, scoreA, scoreB] of rd.results) {
+      let winners, losers;
+      if (scoreA > scoreB) { winners = teamA; losers = teamB; }
+      else if (scoreB > scoreA) { winners = teamB; losers = teamA; }
+      else { winners = []; losers = teamA.concat(teamB); }
+      for (const p of winners) roundResult[p] = true;
+      for (const p of losers) roundResult[p] = false;
+    }
+    for (const p in roundResult) {
+      if (p in streaks) streaks[p] = roundResult[p] ? streaks[p] + 1 : 0;
+    }
+  }
+  return streaks;
+}
+
+function swapTwoPlayers(currentMatchups, benched, playerX, playerY) {
+  const remap = (p) => (p === playerX ? playerY : (p === playerY ? playerX : p));
+  const newMatchups = currentMatchups.map(([teamA, teamB]) => [teamA.map(remap), teamB.map(remap)]);
+  const newBenched = benched.map(remap);
+  return [newMatchups, newBenched];
+}
+
+function pairKey(x, y) { return [x, y].sort().join('~'); }
+
+function pickBestSplit(chunk, teamSize, players, gameType, partnerCount, opponentCount) {
+  const seen = new Set();
+  const candidates = [];
+  for (const teamA of combinations(chunk, teamSize)) {
+    const teamB = chunk.filter(p => !teamA.includes(p));
+    const key = [teamA.slice().sort().join(','), teamB.slice().sort().join(',')].sort().join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push([teamA, teamB]);
+  }
+
+  function score([teamA, teamB]) {
+    let repeatScore = 0;
+    for (const team of [teamA, teamB]) {
+      for (const [x, y] of combinations(team, 2)) repeatScore += partnerCount[pairKey(x, y)] || 0;
+    }
+    for (const x of teamA) for (const y of teamB) repeatScore += (opponentCount[pairKey(x, y)] || 0) * 0.5;
+    let mixedScore = 0;
+    if (gameType === 'padel_mixed') {
+      for (const team of [teamA, teamB]) {
+        const genders = new Set(team.map(p => players[p].gender));
+        if (genders.size > 1) mixedScore -= 1;
+      }
+    }
+    const sumA = teamA.reduce((a, p) => a + players[p].tourney_pts, 0);
+    const sumB = teamB.reduce((a, p) => a + players[p].tourney_pts, 0);
+    return [mixedScore, repeatScore, Math.abs(sumA - sumB)];
+  }
+
+  let best = candidates[0], bestScore = score(candidates[0]);
+  for (const c of candidates.slice(1)) {
+    const s = score(c);
+    if (s[0] < bestScore[0] || (s[0] === bestScore[0] && s[1] < bestScore[1]) ||
+        (s[0] === bestScore[0] && s[1] === bestScore[1] && s[2] < bestScore[2])) {
+      best = c; bestScore = s;
+    }
+  }
+  return best;
+}
+
+function shuffleArr(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function generateRound(players, gameType, numCourts, teamSize, completedRounds) {
+  const activePool = Object.keys(players).filter(p => !players[p].retired);
+  const slotSize = teamSize * 2;
+  const matchesThisRound = slotSize > 0 ? Math.min(numCourts, Math.floor(activePool.length / slotSize)) : 0;
+  const slotsNeeded = matchesThisRound * slotSize;
+
+  const shuffled = shuffleArr(activePool);
+  const fairnessSorted = shuffled.slice().sort((a, b) => {
+    const pa = players[a], pb = players[b];
+    if (pa.played !== pb.played) return pa.played - pb.played;
+    if (pa.tourney_pts !== pb.tourney_pts) return pb.tourney_pts - pa.tourney_pts;
+    if (pa.diff !== pb.diff) return pb.diff - pa.diff;
+    return pb.points_won - pa.points_won;
+  });
+  const selected = fairnessSorted.slice(0, slotsNeeded);
+  const benched = fairnessSorted.slice(slotsNeeded);
+
+  const skillSorted = selected.slice().sort((a, b) => {
+    const pa = players[a], pb = players[b];
+    if (pa.tourney_pts !== pb.tourney_pts) return pb.tourney_pts - pa.tourney_pts;
+    if ((pa.seed ?? 3) !== (pb.seed ?? 3)) return (pb.seed ?? 3) - (pa.seed ?? 3);
+    if (pa.diff !== pb.diff) return pb.diff - pa.diff;
+    return pb.points_won - pa.points_won;
+  });
+
+  const partnerCount = {}, opponentCount = {};
+  for (const rd of completedRounds) {
+    for (const [teamA, teamB] of rd.results) {
+      for (const team of [teamA, teamB]) {
+        for (const [x, y] of combinations(team, 2)) {
+          const k = pairKey(x, y);
+          partnerCount[k] = (partnerCount[k] || 0) + 1;
+        }
+      }
+      for (const x of teamA) for (const y of teamB) {
+        const k = pairKey(x, y);
+        opponentCount[k] = (opponentCount[k] || 0) + 1;
+      }
+    }
+  }
+
+  const matchups = [];
+  for (let i = 0; i < matchesThisRound; i++) {
+    const chunk = skillSorted.slice(i * slotSize, (i + 1) * slotSize);
+    matchups.push(pickBestSplit(chunk, teamSize, players, gameType, partnerCount, opponentCount));
+  }
+  return { matchups, benched };
+}
+
+function getRankedStandings(standingsList) {
+  const ranked = [];
+  let rank = 1, actualPosition = 1, prevStats = null;
+  for (const item of standingsList) {
+    const cur = [item[0], item[1], item[2]];
+    if (prevStats !== null && (cur[0] !== prevStats[0] || cur[1] !== prevStats[1] || cur[2] !== prevStats[2])) {
+      rank = actualPosition;
+    }
+    ranked.push([rank, item]);
+    prevStats = cur;
+    actualPosition += 1;
+  }
+  return ranked;
+}
+
+/* =========================================================================
+   STATE, PERSISTENCE (localStorage — everything stays on this device)
+   ========================================================================= */
+
+const STATE_KEY = 'offline_tournament_state_v1';
+const TEMPLATES_KEY = 'offline_tournament_templates_v1';
+
+function defaultState() {
+  return {
+    stage: 'landing',
+    game_type: 'padel',
+    team_size: 2,
+    num_courts: 2,
+    total_players: 8,
+    use_seeding: false,
+    players: {},
+    round_num: 1,
+    current_matchups: [],
+    benched_players: [],
+    completed_rounds: [],
+    undo_scores: null,
+    fanny_alert: false,
+    roster_alert: '',
+    confirm_end: false,
+  };
+}
+
+let state = loadState() || defaultState();
+let templates = loadTemplates();
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STATE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function persist() {
+  try { localStorage.setItem(STATE_KEY, JSON.stringify(state)); } catch (e) { /* storage full/unavailable */ }
+}
+function loadTemplates() {
+  try {
+    const raw = localStorage.getItem(TEMPLATES_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) { return {}; }
+}
+function persistTemplates() {
+  try { localStorage.setItem(TEMPLATES_KEY, JSON.stringify(templates)); } catch (e) { /* ignore */ }
+}
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* =========================================================================
+   RENDER
+   ========================================================================= */
+
+function render() {
+  const app = document.getElementById('app');
+  if (state.stage === 'landing') app.innerHTML = viewLanding();
+  else if (state.stage === 'config') app.innerHTML = viewConfig();
+  else if (state.stage === 'setup_players') app.innerHTML = viewSetupPlayers();
+  else if (state.stage === 'playing') app.innerHTML = viewPlaying();
+  else if (state.stage === 'finished') app.innerHTML = viewFinished();
+  else app.innerHTML = viewLanding();
+}
+
+function viewLanding() {
+  const hasSaved = state.stage !== 'landing';
+  let html = `<h1>🏆 2v2 Shuffle — Offline</h1>
+  <p class="muted">Fully offline. Everything is stored only in this browser (localStorage) — nothing is sent anywhere.</p>
+  <div class="card">
+    <h2>New Tournament</h2>
+    <button onclick="startNewTournament()">Start New Tournament</button>
+  </div>`;
+  if (hasSaved) {
+    html += `<div class="card">
+      <h2>Resume</h2>
+      <p class="muted">You have a tournament in progress (Round ${state.round_num || 1}, stage: ${esc(state.stage)}).</p>
+      <button class="success" onclick="resumeTournament()">Resume Tournament</button>
+    </div>`;
+  }
+  return html;
+}
+
+function startNewTournament() {
+  if (state.stage !== 'landing') {
+    if (!confirm('Starting a new tournament will replace the one currently saved. Continue?')) return;
+  }
+  state = defaultState();
+  state.stage = 'config';
+  persist();
+  render();
+}
+
+function resumeTournament() { render(); }
+
+function viewConfig() {
+  return `<h1>Setup</h1>
+  <div class="card">
+    <label>Game Type</label>
+    <select id="cfg_game_type" onchange="onConfigGameTypeChange()">
+      <option value="padel" ${state.game_type === 'padel' ? 'selected' : ''}>padel</option>
+      <option value="padel_mixed" ${state.game_type === 'padel_mixed' ? 'selected' : ''}>padel_mixed</option>
+      <option value="babyfoot" ${state.game_type === 'babyfoot' ? 'selected' : ''}>babyfoot</option>
+    </select>
+    <label style="margin-top:10px;">Team Size (players per team)</label>
+    <input type="number" id="cfg_team_size" min="1" max="4" value="${state.team_size}">
+    <label style="margin-top:10px;">Total Players</label>
+    <input type="number" id="cfg_total_players" min="${state.team_size * 2}" value="${state.total_players}">
+    <label style="margin-top:10px;">Courts Available</label>
+    <input type="number" id="cfg_num_courts" min="1" value="${state.num_courts}">
+    <button onclick="submitConfig()">Next: Players</button>
+  </div>`;
+}
+
+function onConfigGameTypeChange() { /* no-op, read at submit time */ }
+
+function submitConfig() {
+  const gameType = document.getElementById('cfg_game_type').value;
+  const teamSize = parseInt(document.getElementById('cfg_team_size').value, 10) || 2;
+  const totalPlayers = parseInt(document.getElementById('cfg_total_players').value, 10) || teamSize * 4;
+  const numCourts = parseInt(document.getElementById('cfg_num_courts').value, 10) || 1;
+  if (totalPlayers < teamSize * 2) { alert(`Need at least ${teamSize * 2} players for team size ${teamSize}.`); return; }
+  state.game_type = gameType;
+  state.team_size = teamSize;
+  state.total_players = totalPlayers;
+  state.num_courts = numCourts;
+  state.players = {};
+  state.round_num = 1;
+  state.current_matchups = [];
+  state.benched_players = [];
+  state.completed_rounds = [];
+  state.undo_scores = null;
+  state.fanny_alert = false;
+  state.roster_alert = '';
+  state.stage = 'setup_players';
+  persist();
+  render();
+}
+
+function viewSetupPlayers() {
+  const teamSize = state.team_size, n = state.total_players;
+  const slotSize = teamSize * 2;
+  const matchesPossible = Math.min(999, Math.floor(n / slotSize)); // courts unknown effect ignored here, matches Python's pre-game estimate
+  let cycleLine = '';
+  if (matchesPossible > 0) {
+    const P = matchesPossible * slotSize;
+    const lcmV = (P * n) / gcd(P, n);
+    const cycleMatches = Math.floor(lcmV / P) * matchesPossible;
+    cycleLine = `<p class="muted">Aim for a multiple of ${cycleMatches} rounds for equal play time.</p>`;
+  }
+
+  let rows = '';
+  for (let i = 0; i < n; i++) {
+    const savedName = state._draft_names && state._draft_names[i] ? state._draft_names[i] : '';
+    const savedGender = state._draft_genders && state._draft_genders[i] ? state._draft_genders[i] : 'm';
+    const savedSeed = state._draft_seeds && state._draft_seeds[i] ? state._draft_seeds[i] : 3;
+    rows += `<div class="row" style="margin-bottom:6px;">
+      <div><label>Player ${i + 1}</label><input type="text" id="name_${i}" value="${esc(savedName)}"></div>
+      ${state.game_type === 'padel_mixed' ? `<div><label>Gender</label><select id="gender_${i}">
+        <option value="m" ${savedGender === 'm' ? 'selected' : ''}>m</option>
+        <option value="f" ${savedGender === 'f' ? 'selected' : ''}>f</option>
+      </select></div>` : ''}
+      ${state.use_seeding ? `<div><label>Skill</label><select id="seed_${i}">
+        ${[1,2,3,4,5].map(v => `<option value="${v}" ${v === savedSeed ? 'selected' : ''}>${v}</option>`).join('')}
+      </select></div>` : ''}
+    </div>`;
+  }
+
+  const templateNames = Object.keys(templates);
+
+  return `<h1>Players</h1>
+  ${cycleLine}
+  <div class="card">
+    <label><input type="checkbox" id="use_seeding_cb" style="width:auto;" ${state.use_seeding ? 'checked' : ''} onchange="toggleSeeding()"> Rate player skill 1-5 for fairer early pairing (optional)</label>
+    ${rows}
+    <button onclick="submitPlayers()">Start Tournament</button>
+  </div>
+  <div class="card">
+    <h2>📋 Roster Templates</h2>
+    <div class="row">
+      <div>
+        <label>Load</label>
+        <select id="template_choice">${templateNames.length ? templateNames.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('') : '<option>No templates saved</option>'}</select>
+        <button class="secondary small-btn" onclick="loadTemplateIntoForm()" ${templateNames.length ? '' : 'disabled'}>Load Template</button>
+      </div>
+      <div>
+        <label>Save current names</label>
+        <input type="text" id="new_template_name" placeholder="Template name">
+        <button class="secondary small-btn" onclick="saveCurrentAsTemplate()">Save as Template</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function toggleSeeding() {
+  saveDraftInputs();
+  state.use_seeding = document.getElementById('use_seeding_cb').checked;
+  render();
+}
+
+function saveDraftInputs() {
+  const n = state.total_players;
+  state._draft_names = [];
+  state._draft_genders = [];
+  state._draft_seeds = [];
+  for (let i = 0; i < n; i++) {
+    const nameEl = document.getElementById(`name_${i}`);
+    state._draft_names.push(nameEl ? nameEl.value : '');
+    const genderEl = document.getElementById(`gender_${i}`);
+    state._draft_genders.push(genderEl ? genderEl.value : 'm');
+    const seedEl = document.getElementById(`seed_${i}`);
+    state._draft_seeds.push(seedEl ? parseInt(seedEl.value, 10) : 3);
+  }
+}
+
+function loadTemplateIntoForm() {
+  const name = document.getElementById('template_choice').value;
+  const tmpl = templates[name];
+  if (!tmpl || tmpl.names.length !== state.total_players) {
+    alert(`Template has ${tmpl ? tmpl.names.length : 0} players; this room needs ${state.total_players}.`);
+    return;
+  }
+  state._draft_names = tmpl.names.slice();
+  state._draft_genders = (tmpl.genders || []).slice();
+  render();
+}
+
+function saveCurrentAsTemplate() {
+  saveDraftInputs();
+  const name = document.getElementById('new_template_name').value.trim();
+  const names = state._draft_names.map(n => (n || '').trim());
+  if (!name || names.some(n => !n)) { alert('Fill in a template name and all player names first.'); return; }
+  templates[name] = { names, genders: state.game_type === 'padel_mixed' ? state._draft_genders.slice() : [] };
+  persistTemplates();
+  alert(`Saved template '${name}'.`);
+  render();
+}
+
+function submitPlayers() {
+  const n = state.total_players;
+  const names = [], genders = [], seeds = [];
+  for (let i = 0; i < n; i++) {
+    const name = document.getElementById(`name_${i}`).value.trim();
+    names.push(name);
+    genders.push(state.game_type === 'padel_mixed' ? document.getElementById(`gender_${i}`).value : null);
+    seeds.push(state.use_seeding ? parseInt(document.getElementById(`seed_${i}`).value, 10) : 3);
+  }
+  const nonEmpty = names.filter(n => n);
+  if (nonEmpty.length !== n || new Set(nonEmpty).size !== n) { alert('Enter unique names for all players.'); return; }
+  state.players = {};
+  for (let i = 0; i < n; i++) {
+    state.players[names[i]] = { played: 0, tourney_pts: 0, diff: 0, points_won: 0, gender: genders[i], seed: seeds[i], retired: false };
+  }
+  delete state._draft_names; delete state._draft_genders; delete state._draft_seeds;
+  state.stage = 'playing';
+  persist();
+  render();
+}
+
+function activePool() { return Object.keys(state.players).filter(p => !state.players[p].retired); }
+
+function viewPlaying() {
+  const teamSize = state.team_size;
+  const minNeeded = Math.max(4, teamSize * 2);
+  const pool = activePool();
+  let html = `<h1>Round ${state.round_num}</h1>`;
+
+  if (state.fanny_alert) {
+    html += `<div class="banner-warn">👇 Fanny!</div>`;
+    state.fanny_alert = false; persist();
+  }
+  if (state.roster_alert) {
+    const isWarn = state.roster_alert.includes('⚠️');
+    html += `<div class="${isWarn ? 'banner-warn' : 'banner-ok'}">${esc(state.roster_alert)}</div>`;
+    state.roster_alert = ''; persist();
+  }
+
+  if (pool.length < minNeeded) {
+    html += `<div class="banner-warn">⏸️ Paused — need at least ${minNeeded} active players.</div>`;
+    state.current_matchups = []; state.benched_players = pool; persist();
+    html += renderPlayersPanel();
+    html += renderStandings();
+    return html;
+  }
+
+  if (!state.current_matchups.length) {
+    const { matchups, benched } = generateRound(state.players, state.game_type, state.num_courts, teamSize, state.completed_rounds);
+    state.current_matchups = matchups;
+    state.benched_players = benched;
+    persist();
+  }
+
+  const [catchupR, cRounds, cMatches] = calculateCycleInfo(state.players, state.num_courts, teamSize);
+  let cycleText;
+  if (catchupR === -1) cycleText = '🔁 Everyone plays every round — no catch-up needed.';
+  else if (catchupR === -2) cycleText = '🔁 ⚠️ Roster changes make perfect equality impossible now.';
+  else if (catchupR === 0) cycleText = `🔁 Everyone's equal now. Cycle: every ${cRounds} round(s) (${cMatches} matches).`;
+  else cycleText = `🔁 ${catchupR} round(s) until everyone's equal. Cycle: every ${cRounds} round(s) (${cMatches} matches).`;
+  html += `<p class="muted">${cycleText}</p>`;
+
+  if (state.benched_players.length) {
+    html += `<p class="muted">🪑 Benched: ${state.benched_players.map(esc).join(', ')}</p>`;
+  }
+
+  html += `<div class="card"><h2>Scores</h2>`;
+  state.current_matchups.forEach(([teamA, teamB], i) => {
+    const defA = (state.undo_scores && state.undo_scores[i]) ? state.undo_scores[i][2] : 0;
+    const defB = (state.undo_scores && state.undo_scores[i]) ? state.undo_scores[i][3] : 0;
+    html += `<div class="match-card">
+      <div>🏟️ Court ${i + 1}: ${teamA.map(esc).join(' & ')} vs ${teamB.map(esc).join(' & ')}</div>
+      <div class="row" style="margin-top:6px;">
+        <div><label>Score A</label><input type="number" min="0" id="sa_${i}" value="${defA}"></div>
+        <div><label>Score B</label><input type="number" min="0" id="sb_${i}" value="${defB}"></div>
+      </div>
+    </div>`;
+  });
+  html += `<button onclick="submitScores()">Submit &amp; Next Round</button></div>`;
+
+  if (state.completed_rounds.length) {
+    html += `<button class="secondary" onclick="undoLastRound()">⚠️ Undo Last Round</button>`;
+  }
+
+  html += renderPlayersPanel();
+
+  html += `<div class="card"><h2>🏟️ Courts</h2>
+    <label>Courts available</label>
+    <input type="number" min="1" id="courts_input" value="${state.num_courts}">
+    <button class="secondary" onclick="updateCourts()">Update</button>
+  </div>`;
+
+  html += renderStandings();
+
+  if (state.completed_rounds.length) {
+    html += `<div class="card"><h2>📜 Edit Past Scores</h2>${renderEditableHistory()}</div>`;
+  }
+
+  html += `<div class="divider"></div>`;
+  if (!state.confirm_end) {
+    html += `<button class="danger" onclick="askEndTournament()">🏁 End Tournament</button>`;
+  } else {
+    html += `<div class="banner-warn">End the tournament now? This moves everyone to final standings.</div>
+    <div class="row">
+      <button class="success" onclick="endTournament()">✅ Yes, End It</button>
+      <button class="secondary" onclick="cancelEndTournament()">Cancel</button>
+    </div>`;
+  }
+  return html;
+}
+
+function renderPlayersPanel() {
+  const pool = activePool();
+  const retiredPool = Object.keys(state.players).filter(p => state.players[p].retired);
+  const playing = state.current_matchups.flatMap(([a, b]) => a.concat(b));
+  const swapPool = playing.concat(state.benched_players);
+
+  return `<div class="card"><h2>🛠️ Players &amp; Swaps</h2>
+    <div class="cols3">
+      <div>
+        <h3>Add</h3>
+        <input type="text" id="add_name" placeholder="Name">
+        ${state.game_type === 'padel_mixed' ? `<select id="add_gender"><option value="m">m</option><option value="f">f</option></select>` : ''}
+        <button class="secondary small-btn" onclick="addPlayer()">Add</button>
+      </div>
+      <div>
+        <h3>Retire</h3>
+        ${pool.length ? `<select id="retire_select">${pool.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select>
+        <button class="secondary small-btn" onclick="retirePlayer()">Retire</button>` : '<p class="muted">No active players.</p>'}
+      </div>
+      <div>
+        <h3>Bring Back</h3>
+        ${retiredPool.length ? `<select id="reactivate_select">${retiredPool.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select>
+        <button class="secondary small-btn" onclick="reactivatePlayer()">Bring Back</button>` : '<p class="muted">None retired.</p>'}
+      </div>
+    </div>
+    <div class="divider"></div>
+    <h3>Swap Players</h3>
+    ${swapPool.length >= 2 ? `<div class="row">
+      <select id="swap_a">${swapPool.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select>
+      <select id="swap_b">${swapPool.map((p,i) => `<option value="${esc(p)}" ${i===1?'selected':''}>${esc(p)}</option>`).join('')}</select>
+    </div>
+    <button class="secondary" onclick="swapPlayers()">Swap</button>` : '<p class="muted">Not enough players in play to swap.</p>'}
+  </div>`;
+}
+
+function addPlayer() {
+  const name = document.getElementById('add_name').value.trim();
+  if (!name) return;
+  if (state.players[name]) { alert('Already exists.'); return; }
+  const gender = state.game_type === 'padel_mixed' ? document.getElementById('add_gender').value : null;
+  state.players[name] = { played: 0, tourney_pts: 0, diff: 0, points_won: 0, gender, seed: 3, retired: false };
+  state.current_matchups = [];
+  const [catchupR, , cMatches] = calculateCycleInfo(state.players, state.num_courts, state.team_size);
+  state.roster_alert = catchupR > 0 ? `🔄 ${name} added. ${catchupR} rounds to even out.`
+    : catchupR === 0 ? `🔄 ${name} added.`
+    : `🔄 ${name} added. ⚠️ Can't perfectly even out with this roster.`;
+  persist(); render();
+}
+
+function retirePlayer() {
+  const name = document.getElementById('retire_select').value;
+  state.players[name].retired = true;
+  state.current_matchups = [];
+  const [catchupR] = calculateCycleInfo(state.players, state.num_courts, state.team_size);
+  state.roster_alert = catchupR > 0 ? `👋 ${name} retired. ${catchupR} rounds to even out.`
+    : catchupR === 0 ? `👋 ${name} retired.`
+    : `👋 ${name} retired. ⚠️ Can't perfectly even out with this roster.`;
+  persist(); render();
+}
+
+function reactivatePlayer() {
+  const name = document.getElementById('reactivate_select').value;
+  state.players[name].retired = false;
+  state.current_matchups = [];
+  const [catchupR] = calculateCycleInfo(state.players, state.num_courts, state.team_size);
+  state.roster_alert = catchupR > 0 ? `🙌 ${name} is back. ${catchupR} rounds to even out.`
+    : catchupR === 0 ? `🙌 ${name} is back.`
+    : `🙌 ${name} is back. ⚠️ Can't perfectly even out with this roster.`;
+  persist(); render();
+}
+
+function swapPlayers() {
+  const a = document.getElementById('swap_a').value;
+  const b = document.getElementById('swap_b').value;
+  if (a === b) { alert('Pick two different players.'); return; }
+  const [newMatchups, newBenched] = swapTwoPlayers(state.current_matchups, state.benched_players, a, b);
+  state.current_matchups = newMatchups;
+  state.benched_players = newBenched;
+  persist(); render();
+}
+
+function updateCourts() {
+  const n = parseInt(document.getElementById('courts_input').value, 10);
+  if (!n || n < 1) return;
+  if (n !== state.num_courts) {
+    state.num_courts = n;
+    state.current_matchups = [];
+    persist();
+  }
+  render();
+}
+
+function submitScores() {
+  const results = [];
+  for (let i = 0; i < state.current_matchups.length; i++) {
+    const [teamA, teamB] = state.current_matchups[i];
+    const sa = parseInt(document.getElementById(`sa_${i}`).value, 10) || 0;
+    const sb = parseInt(document.getElementById(`sb_${i}`).value, 10) || 0;
+    if (state.game_type === 'babyfoot') {
+      if (!(sa >= 0 && sa <= 10 && sb >= 0 && sb <= 10) || !(sa === 10 || sb === 10) || sa === sb) {
+        alert('Score must reach 10, no ties.'); return;
+      }
+    }
+    results.push([teamA, teamB, sa, sb]);
+  }
+  state.completed_rounds.push({ round_num: state.round_num, results });
+  state.undo_scores = null;
+  state.fanny_alert = false;
+  if (state.game_type === 'babyfoot') {
+    for (const [, , sa, sb] of results) {
+      if ((sa === 10 && sb === 0) || (sa === 0 && sb === 10)) state.fanny_alert = true;
+    }
+  }
+  recomputePlayerStats(state.players, state.completed_rounds, state.game_type);
+  state.round_num += 1;
+  state.current_matchups = [];
+  persist();
+  render();
+}
+
+function undoLastRound() {
+  const last = state.completed_rounds.pop();
+  state.round_num -= 1;
+  state.current_matchups = last.results.map(r => [r[0], r[1]]);
+  state.undo_scores = last.results;
+  const playedNames = new Set(last.results.flatMap(r => r[0].concat(r[1])));
+  state.benched_players = activePool().filter(p => !playedNames.has(p));
+  recomputePlayerStats(state.players, state.completed_rounds, state.game_type);
+  persist();
+  render();
+}
+
+function askEndTournament() { state.confirm_end = true; render(); }
+function cancelEndTournament() { state.confirm_end = false; render(); }
+function endTournament() {
+  state.confirm_end = false;
+  state.stage = 'finished';
+  persist();
+  render();
+}
+
+function renderStandings() {
+  const streaks = computeStreaks(state.players, state.completed_rounds);
+  const standings = Object.entries(state.players).map(([p, s]) => {
+    let label = s.retired ? `${p} (Retired)` : (streaks[p] >= 3 ? `${p} 🔥` : p);
+    return [-s.tourney_pts, -s.diff, -s.points_won, s.played, label];
+  }).sort((a, b) => a[0]-b[0] || a[1]-b[1] || a[2]-b[2] || a[3]-b[3]);
+  const ranked = getRankedStandings(standings);
+  let rows = ranked.map(([rank, item]) => `<tr><td>${rank}</td><td>${esc(item[4])}</td><td>${-item[0]}</td><td>${-item[1]}</td><td>${-item[2]}</td><td>${item[3]}</td></tr>`).join('');
+  return `<div class="card"><h2>Standings</h2><table>
+    <tr><th>Rank</th><th>Player</th><th>Pts</th><th>Diff</th><th>Won</th><th>Matches</th></tr>
+    ${rows}
+  </table></div>`;
+}
+
+function renderEditableHistory() {
+  let html = '';
+  const reversed = state.completed_rounds.slice().reverse();
+  for (const rd of reversed) {
+    html += `<h3>Round ${rd.round_num}</h3>`;
+    rd.results.forEach(([teamA, teamB, sa, sb], i) => {
+      html += `<div class="row" style="align-items:flex-end;">
+        <div style="flex:3;"><span class="muted">${teamA.map(esc).join(' & ')} vs ${teamB.map(esc).join(' & ')}</span></div>
+        <div><input type="number" min="0" id="hsa_${rd.round_num}_${i}" value="${sa}"></div>
+        <div><input type="number" min="0" id="hsb_${rd.round_num}_${i}" value="${sb}"></div>
+      </div>`;
+    });
+    html += `<button class="secondary small-btn" onclick="saveEditedRound(${rd.round_num})">Save Round ${rd.round_num}</button><div class="divider"></div>`;
+  }
+  return html;
+}
+
+function saveEditedRound(roundNum) {
+  const rd = state.completed_rounds.find(r => r.round_num === roundNum);
+  const edited = [];
+  for (let i = 0; i < rd.results.length; i++) {
+    const [teamA, teamB] = rd.results[i];
+    const sa = parseInt(document.getElementById(`hsa_${roundNum}_${i}`).value, 10) || 0;
+    const sb = parseInt(document.getElementById(`hsb_${roundNum}_${i}`).value, 10) || 0;
+    if (state.game_type === 'babyfoot') {
+      if (!(sa >= 0 && sa <= 10 && sb >= 0 && sb <= 10) || !(sa === 10 || sb === 10) || sa === sb) {
+        alert('Score must reach 10, no ties.'); return;
+      }
+    }
+    edited.push([teamA, teamB, sa, sb]);
+  }
+  rd.results = edited;
+  recomputePlayerStats(state.players, state.completed_rounds, state.game_type);
+  persist();
+  render();
+}
+
+/* ---- Finished stage: podium, downloads, stats ---- */
+
+function viewFinished() {
+  const streaks = computeStreaks(state.players, state.completed_rounds);
+  const standings = Object.entries(state.players).map(([p, s]) => {
+    const label = s.retired ? `${p} (Retired)` : p;
+    return [-s.tourney_pts, -s.diff, -s.points_won, s.played, label];
+  }).sort((a, b) => a[0]-b[0] || a[1]-b[1] || a[2]-b[2] || a[3]-b[3]);
+  const ranked = getRankedStandings(standings);
+
+  let rows = ranked.map(([rank, item]) => `<tr><td>${rank}</td><td>${esc(item[4])}</td><td>${-item[0]}</td><td>${-item[1]}</td><td>${-item[2]}</td><td>${item[3]}</td></tr>`).join('');
+
+  let html = `<h1>🏆 Final Standings</h1>
+  <div class="card"><table>
+    <tr><th>Rank</th><th>Player</th><th>Pts</th><th>Diff</th><th>Won</th><th>Matches</th></tr>
+    ${rows}
+  </table>
+  <button onclick="downloadTxt()">📄 Download .TXT</button>
+  <button class="secondary" onclick="downloadCsv()">📊 Download .CSV</button>
+  </div>`;
+
+  html += renderDetailedStats();
+
+  html += `<div class="divider"></div>
+  <div class="row">
+    <button class="secondary" onclick="backToTournament()">⬅️ Back</button>
+    <button class="danger" onclick="startNewTournament()">New Tournament</button>
+  </div>`;
+  return html;
+}
+
+function backToTournament() { state.stage = 'playing'; persist(); render(); }
+
+function buildStandingsRows() {
+  const standings = Object.entries(state.players).map(([p, s]) => {
+    const label = s.retired ? `${p} (Retired)` : p;
+    return [-s.tourney_pts, -s.diff, -s.points_won, s.played, label];
+  }).sort((a, b) => a[0]-b[0] || a[1]-b[1] || a[2]-b[2] || a[3]-b[3]);
+  return getRankedStandings(standings);
+}
+
+function downloadTxt() {
+  const ranked = buildStandingsRows();
+  const displayGame = state.game_type.startsWith('padel') ? 'padel' : state.game_type;
+  let txt = '='.repeat(56) + '\n';
+  txt += `FINAL ${displayGame.toUpperCase()} STANDINGS\n`;
+  txt += `Total Rounds: ${state.completed_rounds.length}\n`;
+  txt += '='.repeat(56) + '\n';
+  for (const [rank, item] of ranked) {
+    txt += `Rank ${rank} | ${item[4]} | Pts ${-item[0]} | Diff ${-item[1]} | Won ${-item[2]} | Matches ${item[3]}\n`;
+  }
+  triggerDownload(txt, `${displayGame}_results.txt`, 'text/plain');
+}
+
+function downloadCsv() {
+  const ranked = buildStandingsRows();
+  let csv = 'Rank,Player,Pts,Diff,Won,Matches\n';
+  for (const [rank, item] of ranked) csv += `${rank},${item[4]},${-item[0]},${-item[1]},${-item[2]},${item[3]}\n`;
+  triggerDownload(csv, 'results.csv', 'text/csv');
+}
+
+function triggerDownload(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function renderDetailedStats() {
+  if (!state.completed_rounds.length) return `<div class="card"><p class="muted">No matches yet.</p></div>`;
+
+  const duos = {};
+  for (const rd of state.completed_rounds) {
+    for (const [teamA, teamB, sa, sb] of rd.results) {
+      for (const [team, score, opp] of [[teamA, sa, sb], [teamB, sb, sa]]) {
+        for (const [x, y] of combinations(team, 2)) {
+          const key = [x, y].sort().join(' & ');
+          duos[key] = duos[key] || { pts: 0, diff: 0, matches: 0 };
+          duos[key].pts += score; duos[key].diff += (score - opp); duos[key].matches += 1;
+        }
+      }
+    }
+  }
+  let bestDuoHtml = '';
+  const duoEntries = Object.entries(duos);
+  if (duoEntries.length) {
+    duoEntries.sort((a, b) => (b[1].diff / b[1].matches) - (a[1].diff / a[1].matches) || b[1].pts - a[1].pts);
+    const [name, s] = duoEntries[0];
+    bestDuoHtml = `<div class="banner-ok">🌟 Best Duo: ${esc(name)} (+${s.diff} diff)</div>`;
+  }
+
+  const h2h = {};
+  for (const rd of state.completed_rounds) {
+    for (const [teamA, teamB, sa, sb] of rd.results) {
+      for (const pa of teamA) { h2h[pa] = h2h[pa] || {}; for (const pb of teamB) h2h[pa][pb] = (h2h[pa][pb] || 0) + (sa - sb); }
+      for (const pb of teamB) { h2h[pb] = h2h[pb] || {}; for (const pa of teamA) h2h[pb][pa] = (h2h[pb][pa] || 0) + (sb - sa); }
+    }
+  }
+  let nemesisHtml = '';
+  let lowestDiff = 0, worst = null;
+  for (const victim in h2h) {
+    for (const nemesis in h2h[victim]) {
+      if (h2h[victim][nemesis] < lowestDiff) { lowestDiff = h2h[victim][nemesis]; worst = [nemesis, victim, h2h[victim][nemesis]]; }
+    }
+  }
+  if (worst) nemesisHtml = `<div class="banner-warn">😈 Nemesis: ${esc(worst[0])} dominated ${esc(worst[1])} (+${Math.abs(worst[2])} pts)</div>`;
+
+  const chartSvg = renderPointsChart();
+
+  return `<div class="card"><h2>📈 Detailed Statistics</h2>${bestDuoHtml}${nemesisHtml}${chartSvg}</div>`;
+}
+
+function renderPointsChart() {
+  const playersList = Object.keys(state.players);
+  const series = {}; playersList.forEach(p => series[p] = [0]);
+  for (const rd of state.completed_rounds) {
+    for (const [teamA, teamB, sa, sb] of rd.results) {
+      const [ptsA, ptsB] = computeRoundPoints(state.game_type, sa, sb);
+      for (const p of teamA) series[p].push(series[p][series[p].length - 1] + ptsA);
+      for (const p of teamB) series[p].push(series[p][series[p].length - 1] + ptsB);
+    }
+  }
+  const maxLen = Math.max(...Object.values(series).map(s => s.length), 1);
+  const maxVal = Math.max(1, ...Object.values(series).flat());
+  const width = 680, height = 220, padding = 30;
+  const colors = ['#4f8cff','#22c55e','#f1c40f','#e74c3c','#a78bfa','#f472b6','#38bdf8','#fb923c','#84cc16','#f87171'];
+  let svg = `<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;background:#11151d;border-radius:8px;">`;
+  playersList.forEach((p, idx) => {
+    const s = series[p];
+    const pts = s.map((v, i) => {
+      const x = padding + (i / (maxLen - 1 || 1)) * (width - 2 * padding);
+      const y = height - padding - (v / maxVal) * (height - 2 * padding);
+      return `${x},${y}`;
+    }).join(' ');
+    svg += `<polyline points="${pts}" fill="none" stroke="${colors[idx % colors.length]}" stroke-width="2" />`;
+  });
+  svg += `</svg>
+  <div class="muted" style="margin-top:6px;">${playersList.map((p, i) => `<span style="color:${colors[i % colors.length]};">● ${esc(p)}</span>`).join('&nbsp;&nbsp;')}</div>`;
+  return `<p style="margin-top:10px;"><strong>Points Evolution</strong></p>${svg}`;
+}
+
+render();
+
+// Register the service worker so the app can be reopened with zero network
+// after the first successful load (needed for "works fully offline").
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('service-worker.js').catch(() => { /* ignore: app still works, just without offline pre-cache */ });
+  });
+}
+</script>
+</body>
+</html>
